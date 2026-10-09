@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [develop]
+  push:
+    branches: [develop]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref || github.ref_name }}
+          token: ${{ secrets.OWNER_TOKEN }}
+
+      - name: Registrar la rama en el README
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if [ -z "$TARGET_BRANCH" ]; then
+            echo "No se pudo determinar la rama de destino" >&2
+            exit 1
+          fi
+          BRANCH=$TARGET_BRANCH
+          if [ "$EVENT_NAME" = "push" ]; then
+            SUBJECT=$(git log -1 --pretty=%s)
+            MERGED_BRANCH=$(printf '%s\n' "$SUBJECT" | sed -nE 's|^Merge pull request #[0-9]+ from [^/]+/(.+)$|\1|p')
+            BRANCH=${MERGED_BRANCH:-$TARGET_BRANCH}
+          fi
+          LINE="- Añadida feature: $BRANCH"
+          touch README.md
+          if grep -Fxq -- "$LINE" README.md; then
+            echo "La rama ya estaba registrada"
+          else
+            printf '%s\n' "$LINE" >> README.md
+          fi
+
+      - name: Commit y push del README
+        env:
+          TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if git diff --quiet -- README.md; then
+            echo "Sin cambios que commitear"
+            exit 0
+          fi
+          if [ -z "$TARGET_BRANCH" ]; then
+            echo "No se pudo determinar la rama de destino" >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: registrar rama"
+          git push origin "HEAD:$TARGET_BRANCH"
+
+  validate-dev:
+    needs: update-readme
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validar entorno de desarrollo
+        env:
+          TOKEN: ${{ secrets.DEV_TOKEN }}
+        shell: powershell
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TOKEN)) {
+            Write-Error "DEV_TOKEN no existe o está vacío."
+            exit 1
+          }
+          if ([string]::IsNullOrWhiteSpace($env:LOCAL_DEV_TOKEN)) {
+            Write-Error "LOCAL_DEV_TOKEN no existe o está vacío."
+            exit 1
+          }
+          if ($env:TOKEN -ceq $env:LOCAL_DEV_TOKEN) {
+            Write-Host "CI: validación de desarrollo correcta ✅"
+          } else {
+            Write-Host "CI: validación fallida ❌"
+            Write-Error "DEV_TOKEN y LOCAL_DEV_TOKEN no coinciden."
+            exit 1
+          }
